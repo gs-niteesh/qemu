@@ -3,6 +3,7 @@
 #include "qapi/error.h"
 #include "qapi/qapi-commands-ui.h"
 #include "qapi/qmp/qdict.h"
+#include "qapi/qapi-events-ui.h"
 #include "qemu/error-report.h"
 #include "trace.h"
 #include "ui/input.h"
@@ -418,6 +419,8 @@ void qemu_input_event_send_key(QemuConsole *src, KeyValue *key, bool down)
 {
     InputEvent *evt;
     evt = qemu_input_event_new_key(key, down);
+    qemu_log("Sending event for key: %d\n", key->u.qcode.data);
+    qapi_event_send_key_press(key->u.qcode.data);
     if (QTAILQ_EMPTY(&kbd_queue)) {
         qemu_input_event_send(src, evt);
         qemu_input_event_sync();
