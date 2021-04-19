@@ -26,6 +26,7 @@ import signal
 import socket
 import subprocess
 import tempfile
+import asyncio
 from types import TracebackType
 from typing import (
     Any,
@@ -40,6 +41,7 @@ from typing import (
 
 from . import console_socket, qmp
 from .qmp import QMPMessage, QMPReturnValue, SocketAddrT
+from .qmp_protocol import QMP
 
 
 LOG = logging.getLogger(__name__)
@@ -139,7 +141,7 @@ class QEMUMachine:
         self._events: List[QMPMessage] = []
         self._iolog: Optional[str] = None
         self._qmp_set = True   # Enable QMP monitor by default.
-        self._qmp_connection: Optional[qmp.QEMUMonitorProtocol] = None
+        self._qmp_connection: Optional[qmp_protocol.QMP] = None
         self._qemu_full_args: Tuple[str, ...] = ()
         self._temp_dir: Optional[str] = None
         self._launched = False
@@ -161,7 +163,12 @@ class QEMUMachine:
                  exc_type: Optional[Type[BaseException]],
                  exc_val: Optional[BaseException],
                  exc_tb: Optional[TracebackType]) -> None:
-        self.shutdown()
+        """
+        NOTE: Async context manager has to be used since shutdown is an async
+              function.
+        """
+        #self.shutdown()
+        pass
 
     def add_monitor_null(self) -> None:
         """
@@ -315,17 +322,22 @@ class QEMUMachine:
             if self._remove_monitor_sockfile:
                 assert isinstance(self._monitor_address, str)
                 self._remove_files.append(self._monitor_address)
-            self._qmp_connection = qmp.QEMUMonitorProtocol(
-                self._monitor_address,
-                server=True,
-                nickname=self._name
+            self._qmp_connection = QMP(
+                name=self._name
             )
 
-    def _post_launch(self) -> None:
+    async def _post_launch(self) -> None:
         if self._qmp_connection:
-            self._qmp.accept()
+            await self._qmp.accept(self._monitor_address)
+            @self._qmp.on_event
+            async def get_events_cb(_qmp, evnt):
+                """
+                Called by QMP on events
+                """
+                self._events.append(evnt)
 
-    def _post_shutdown(self) -> None:
+
+    async def _post_shutdown(self) -> None:
         """
         Called to cleanup the VM instance after the process has exited.
         May also be called after a failed launch.
@@ -334,7 +346,7 @@ class QEMUMachine:
         self._early_cleanup()
 
         if self._qmp_connection:
-            self._qmp.close()
+            await self._qmp.disconnect()
             self._qmp_connection = None
 
         if self._qemu_log_file is not None:
@@ -365,7 +377,7 @@ class QEMUMachine:
         self._user_killed = False
         self._launched = False
 
-    def launch(self) -> None:
+    async def launch(self) -> None:
         """
         Launch the VM and make sure we cleanup and expose the
         command line/output in case of exception
@@ -377,10 +389,10 @@ class QEMUMachine:
         self._iolog = None
         self._qemu_full_args = ()
         try:
-            self._launch()
+            await self._launch()
             self._launched = True
         except:
-            self._post_shutdown()
+            await self._post_shutdown()
 
             LOG.debug('Error launching VM')
             if self._qemu_full_args:
@@ -389,7 +401,7 @@ class QEMUMachine:
                 LOG.debug('Output: %r', self._iolog)
             raise
 
-    def _launch(self) -> None:
+    async def _launch(self) -> None:
         """
         Launch the VM and establish a QMP connection
         """
@@ -408,7 +420,7 @@ class QEMUMachine:
                                        stderr=subprocess.STDOUT,
                                        shell=False,
                                        close_fds=False)
-        self._post_launch()
+        await self._post_launch()
 
     def _early_cleanup(self) -> None:
         """
@@ -435,7 +447,7 @@ class QEMUMachine:
         self._subp.kill()
         self._subp.wait(timeout=60)
 
-    def _soft_shutdown(self, timeout: Optional[int],
+    async def _soft_shutdown(self, timeout: Optional[int],
                        has_quit: bool = False) -> None:
         """
         Perform early cleanup, attempt to gracefully shut down the VM, and wait
@@ -454,12 +466,12 @@ class QEMUMachine:
         if self._qmp_connection:
             if not has_quit:
                 # Might raise ConnectionReset
-                self._qmp.cmd('quit')
+                await self.qmp('quit')
 
         # May raise subprocess.TimeoutExpired
         self._subp.wait(timeout=timeout)
 
-    def _do_shutdown(self, timeout: Optional[int],
+    async def _do_shutdown(self, timeout: Optional[int],
                      has_quit: bool = False) -> None:
         """
         Attempt to shutdown the VM gracefully; fallback to a hard shutdown.
@@ -474,13 +486,13 @@ class QEMUMachine:
             may result in its own exceptions, likely subprocess.TimeoutExpired.
         """
         try:
-            self._soft_shutdown(timeout, has_quit)
+            await self._soft_shutdown(timeout, has_quit)
         except Exception as exc:
             self._hard_shutdown()
             raise AbnormalShutdown("Could not perform graceful shutdown") \
                 from exc
 
-    def shutdown(self, has_quit: bool = False,
+    async def shutdown(self, has_quit: bool = False,
                  hard: bool = False,
                  timeout: Optional[int] = 30) -> None:
         """
@@ -504,24 +516,24 @@ class QEMUMachine:
                 self._user_killed = True
                 self._hard_shutdown()
             else:
-                self._do_shutdown(timeout, has_quit)
+                await self._do_shutdown(timeout, has_quit)
         finally:
-            self._post_shutdown()
+            await self._post_shutdown()
 
-    def kill(self) -> None:
+    async def kill(self) -> None:
         """
         Terminate the VM forcefully, wait for it to exit, and perform cleanup.
         """
-        self.shutdown(hard=True)
+        await self.shutdown(hard=True)
 
-    def wait(self, timeout: Optional[int] = 30) -> None:
+    async def wait(self, timeout: Optional[int] = 30) -> None:
         """
         Wait for the VM to power off and perform post-shutdown cleanup.
 
         :param timeout: Optional timeout in seconds. Default 30 seconds.
                         A value of `None` is an infinite wait.
         """
-        self.shutdown(has_quit=True, timeout=timeout)
+        await self.shutdown(has_quit=True, timeout=timeout)
 
     def set_qmp_monitor(self, enabled: bool = True) -> None:
         """
@@ -550,14 +562,29 @@ class QEMUMachine:
                 qmp_args[key] = value
         return qmp_args
 
-    def qmp(self, cmd: str,
+    async def qmp(self, cmd: str,
             conv_keys: bool = True,
             **args: Any) -> QMPMessage:
         """
         Invoke a QMP command and return the response dict
         """
         qmp_args = self._qmp_args(conv_keys, **args)
-        return self._qmp.cmd(cmd, args=qmp_args)
+        result = await self._qmp.execute(cmd, arguments=qmp_args)
+        import json
+        result = json.loads(str(result))
+        return result
+
+    async def cmd(self, name: str,
+            args: Optional[Dict[str, Any]] = None,
+            cmd_id: Optional[Any] = None) -> QMPMessage:
+        """
+        Invoke a QMP command and return the response dict
+        """
+        qmp_cmd: QMPMessage = {'execute': name}
+        import json
+        result = json.dumps(qmp_cmd)
+        result = await self._qmp.execute(qmp_cmd)
+        return result
 
     def command(self, cmd: str,
                 conv_keys: bool = True,
@@ -576,16 +603,28 @@ class QEMUMachine:
         """
         if self._events:
             return self._events.pop(0)
-        return self._qmp.pull_event(wait=wait)
+        # NOTE: Assumes wait is always true
+        while not self._events:
+            # Allow other corounites to run hoping we will receive events.
+            asyncio.sleep(0)
+        return self._events.pop(0)
 
-    def get_qmp_events(self, wait: bool = False) -> List[QMPMessage]:
+    async def get_qmp_events(self, wait: bool = False) -> List[QMPMessage]:
         """
         Poll for queued QMP events and return a list of dicts
         """
-        events = self._qmp.get_events(wait=wait)
-        events.extend(self._events)
-        del self._events[:]
-        self._qmp.clear_events()
+        # get_events: Return cached events and waits for atleast one event if
+        # wait is True
+        #events = self._qmp.get_events(wait=wait)
+        # events.extend(self._events)
+        # del self._events[:]
+
+        # Get new events if any and mimic the original behaviour
+        old_events = self._events[:]
+        self._events.clear()
+        while not self._events:
+            await asyncio.sleep(0)
+        events = old_events.extend(self._events)
         return events
 
     @staticmethod
@@ -621,7 +660,7 @@ class QEMUMachine:
             # either match or event wasn't iterable (not a dict)
             return bool(match == event)
 
-    def event_wait(self, name: str,
+    async def event_wait(self, name: str,
                    timeout: float = 60.0,
                    match: Optional[QMPMessage] = None) -> Optional[QMPMessage]:
         """
@@ -631,9 +670,9 @@ class QEMUMachine:
         timeout: QEMUMonitorProtocol.pull_event timeout parameter.
         match: Optional match criteria. See event_match for details.
         """
-        return self.events_wait([(name, match)], timeout)
+        return await self.events_wait([(name, match)], timeout)
 
-    def events_wait(self,
+    async def events_wait(self,
                     events: Sequence[Tuple[str, Any]],
                     timeout: float = 60.0) -> Optional[QMPMessage]:
         """
@@ -668,14 +707,20 @@ class QEMUMachine:
 
         # Poll for new events
         while True:
-            event = self._qmp.pull_event(wait=timeout)
-            if event is None:
-                # NB: None is only returned when timeout is false-ish.
-                # Timeouts raise QMPTimeoutError instead!
-                break
-            if _match(event):
-                return event
-            self._events.append(event)
+            # event = self._qmp.pull_event(wait=timeout)
+            # if event is None:
+            #     # NB: None is only returned when timeout is false-ish.
+            #     # Timeouts raise QMPTimeoutError instead!
+            #     break
+            old_events = self._events[:]
+            self._events.clear()
+            while not self._events:
+                await asyncio.sleep(0)
+            for event in self._events:
+                if _match(event):
+                    return event
+            old_events.extend(self._events)
+            self._events = old_events
 
         return None
 

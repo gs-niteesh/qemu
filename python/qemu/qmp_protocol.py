@@ -190,7 +190,9 @@ class QMP(AsyncProtocol[Message]):
         if 'event' in msg:
             await self._event_queue.put(msg)
             # FIXME: quick hack; event queue handling.
+            self.logger.debug(self._event_callbacks)
             for func in self._event_callbacks:
+                self.logger.debug(func)
                 await func(self, msg)
             return
 
@@ -290,7 +292,8 @@ class QMP(AsyncProtocol[Message]):
             raise exc
 
         assert isinstance(reply, SuccessResponse)
-        return reply.return_
+        #return reply.return_
+        return reply_msg
 
     async def _execute(self, msg: Message) -> object:
         """
@@ -376,4 +379,5 @@ class QMP(AsyncProtocol[Message]):
         # could be performed using context managers that alter the QMP
         # loop for any commands that occur within that block.
         msg = self.make_execute_msg(cmd, arguments, oob=oob)
-        return await self.execute_msg(msg)
+        result = await self.execute_msg(msg)
+        return result

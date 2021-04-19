@@ -138,13 +138,13 @@ class QEMUQtestMachine(QEMUMachine):
         super()._pre_launch()
         self._qtest = QEMUQtestProtocol(self._qtest_path, server=True)
 
-    def _post_launch(self) -> None:
+    async def _post_launch(self) -> None:
         assert self._qtest is not None
-        super()._post_launch()
+        await super()._post_launch()
         self._qtest.accept()
 
-    def _post_shutdown(self) -> None:
-        super()._post_shutdown()
+    async def _post_shutdown(self) -> None:
+        await super()._post_shutdown()
         self._remove_if_exists(self._qtest_path)
 
     def qtest(self, cmd: str) -> str:

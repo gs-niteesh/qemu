@@ -625,13 +625,13 @@ class VM(qtest.QEMUQtestMachine):
         self._args.append(addr)
         return self
 
-    def hmp(self, command_line: str, use_log: bool = False) -> QMPMessage:
+    async def hmp(self, command_line: str, use_log: bool = False) -> QMPMessage:
         cmd = 'human-monitor-command'
         kwargs: Dict[str, Any] = {'command-line': command_line}
         if use_log:
             return self.qmp_log(cmd, **kwargs)
         else:
-            return self.qmp(cmd, **kwargs)
+            return await self.qmp(cmd, **kwargs)
 
     def pause_drive(self, drive: str, event: Optional[str] = None) -> None:
         """Pause drive r/w operations"""
@@ -676,13 +676,13 @@ class VM(qtest.QEMUQtestMachine):
             result.append(filter_qmp_event(ev))
         return result
 
-    def qmp_log(self, cmd, filters=(), indent=None, **kwargs):
+    async def qmp_log(self, cmd, filters=(), indent=None, **kwargs):
         full_cmd = OrderedDict((
             ("execute", cmd),
             ("arguments", ordered_qmp(kwargs))
         ))
         log(full_cmd, filters, indent=indent)
-        result = self.qmp(cmd, **kwargs)
+        result = await self.qmp(cmd, **kwargs)
         log(result, filters, indent=indent)
         return result
 
@@ -766,9 +766,9 @@ class VM(qtest.QEMUQtestMachine):
             }
         ]))
 
-    def wait_migration(self, expect_runstate: Optional[str]) -> bool:
+    async def wait_migration(self, expect_runstate: Optional[str]) -> bool:
         while True:
-            event = self.event_wait('MIGRATION')
+            event = await self.event_wait('MIGRATION')
             # We use the default timeout, and with a timeout, event_wait()
             # never returns None
             assert event
@@ -782,20 +782,20 @@ class VM(qtest.QEMUQtestMachine):
             # post-migration runstate
             runstate = None
             while runstate != expect_runstate:
-                runstate = self.qmp('query-status')['return']['status']
+                runstate = await self.qmp('query-status')['return']['status']
             return True
         else:
             return False
 
-    def node_info(self, node_name):
-        nodes = self.qmp('query-named-block-nodes')
+    async def node_info(self, node_name):
+        nodes = await self.qmp('query-named-block-nodes')
         for x in nodes['return']:
             if x['node-name'] == node_name:
                 return x
         return None
 
-    def query_bitmaps(self):
-        res = self.qmp("query-named-block-nodes")
+    async def query_bitmaps(self):
+        res = await self.qmp("query-named-block-nodes")
         return {device['node-name']: device['dirty-bitmaps']
                 for device in res['return'] if 'dirty-bitmaps' in device}
 
